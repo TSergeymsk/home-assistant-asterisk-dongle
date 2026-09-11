@@ -113,7 +113,11 @@ async def _discover_devices(hass: HomeAssistant, entry: ConfigEntry) -> None:
         _LOGGER.warning("Не удалось получить список донглов")
         return
 
+    _LOGGER.debug("Ответ 'dongle show devices':\n%s", response)
+
     discovered = _parse_devices_response(response)
+    _LOGGER.debug("Обнаружено устройств: %s", list(discovered.keys()))
+
     discovered_imeis = set(discovered.keys())
     current_imeis = set(devices.keys())
 
@@ -160,43 +164,59 @@ async def _register_device(
 
 
 def _parse_devices_response(response: str) -> dict[str, dict[str, Any]]:
-    """Парсит вывод команды 'dongle show devices'."""
+    """
+    Парсит вывод команды 'dongle show devices'.
+
+    Реальный формат (проверено на Keenetic-2918):
+        ID           Group State      RSSI Mode Submode Provider Name  Model      Firmware          IMEI             IMSI             Number
+        dongle0      0     Free       21   0    0       beeline        E173       11.126.85.00.209  357291041830484  250997278767099  Unknown
+    """
     devices: dict[str, dict[str, Any]] = {}
 
     lines = response.splitlines()
     header_idx = None
     for i, line in enumerate(lines):
-        if "Dongle" in line and "IMEI" in line:
+        # Заголовок: содержит 'State', 'IMEI' и 'Number'
+        if "State" in line and "IMEI" in line and "Number" in line:
             header_idx = i
             break
 
     if header_idx is None:
+        _LOGGER.warning(
+            "Не найден заголовок в выводе 'dongle show devices'. "
+            "Проверьте формат ответа AMI. Ответ:\n%s",
+            response,
+        )
         return devices
 
     for line in lines[header_idx + 1:]:
         line = line.strip()
-        if not line or line.startswith("--"):
+        if not line:
+            continue
+        # Разделители и служебные строки AMI
+        if line.startswith("--"):
+            continue
+        if line.startswith("Response:") or line.startswith("Privilege:"):
+            continue
+        if line.startswith("--END COMMAND--"):
             continue
 
         parts = re.split(r"\s+", line)
-        if len(parts) < 2:
+        if len(parts) < 10:
             continue
 
         dongle_id = parts[0]
-        try:
-            group = parts[1] if len(parts) > 1 else ""
-            state = parts[2] if len(parts) > 2 else ""
-            rssi_raw = parts[3] if len(parts) > 3 else ""
-            mode = parts[4] if len(parts) > 4 else ""
-            submode = parts[5] if len(parts) > 5 else ""
-            provider = parts[6] if len(parts) > 6 else ""
-            model = parts[7] if len(parts) > 7 else ""
-            firmware = parts[8] if len(parts) > 8 else ""
-            imei = parts[9] if len(parts) > 9 else dongle_id
-            imsi = parts[10] if len(parts) > 10 else ""
-            number = parts[11] if len(parts) > 11 else ""
-        except IndexError:
-            continue
+        group     = parts[1]  if len(parts) > 1  else ""
+        state     = parts[2]  if len(parts) > 2  else ""
+        rssi_raw  = parts[3]  if len(parts) > 3  else ""
+        mode      = parts[4]  if len(parts) > 4  else ""
+        submode   = parts[5]  if len(parts) > 5  else ""
+        provider  = parts[6]  if len(parts) > 6  else ""
+        model     = parts[7]  if len(parts) > 7  else ""
+        firmware  = parts[8]  if len(parts) > 8  else ""
+        imei      = parts[9]  if len(parts) > 9  else dongle_id
+        imsi      = parts[10] if len(parts) > 10 else ""
+        number    = parts[11] if len(parts) > 11 else ""
 
         devices[imei] = {
             "dongle_id": dongle_id,
