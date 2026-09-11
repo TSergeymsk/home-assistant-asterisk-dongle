@@ -9,7 +9,7 @@ from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.event import async_track_time_interval
@@ -29,6 +29,11 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS: list[Platform] = [Platform.NOTIFY, Platform.SENSOR]
 
 
+def _strip_ami_output_prefix(line: str) -> str:
+    """Снимает префикс 'Output: ' / 'Output:' из строки ответа AMI."""
+    return re.sub(r"^Output:\s?", "", line)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настройка интеграции из config entry."""
     hass.data.setdefault(DOMAIN, {})
@@ -40,7 +45,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         password=entry.data["password"],
     )
 
-    # Проверка подключения
     if not await hass.async_add_executor_job(manager.test_connection):
         _LOGGER.error("Не удалось подключиться к Asterisk AMI")
         return False
@@ -50,14 +54,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_DEVICES: {},
     }
 
-    # Создаем главное устройство для интеграции и сохраняем его id
     main_device = await _create_main_device(hass, entry)
     hass.data[DOMAIN][entry.entry_id]["main_device_id"] = main_device.id
 
-    # Первоначальное обнаружение донглов
     await _discover_devices(hass, entry)
 
-    # Периодическое обнаружение донглов
     async def _periodic_discovery(now):
         await _discover_devices(hass, entry)
 
@@ -67,9 +68,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
     )
 
-    # Загружаем платформы
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
     return True
 
 
@@ -167,36 +166,53 @@ def _parse_devices_response(response: str) -> dict[str, dict[str, Any]]:
     """
     Парсит вывод команды 'dongle show devices'.
 
-    Реальный формат (проверено на Keenetic-2918):
-        ID           Group State      RSSI Mode Submode Provider Name  Model      Firmware          IMEI             IMSI             Number
-        dongle0      0     Free       21   0    0       beeline        E173       11.126.85.00.209  357291041830484  250997278767099  Unknown
+    Реальный ответ AMI (Keenetic-2918):
+        Response: Success
+        Message: Command output follows
+        Output: ID           Group State      RSSI Mode Submode Provider Name  Model      Firmware          IMEI             IMSI             Number
+        Output: dongle0      0     Free       21   0    0       beeline        E173       11.126.85.00.209  357291041830484  250997278767099  Unknown
+
+    Поля в data-строке (после снятия 'Output: '):
+        [0] dongle0              dongle_id
+        [1] 0                    group
+        [2] Free                 state
+        [3] 21                   rssi_raw
+        [4] 0                    mode
+        [5] 0                    submode
+        [6] beeline              provider
+        [7] E173                 model
+        [8] 11.126.85.00.209     firmware
+        [9] 357291041830484      IMEI
+        [10] 250997278767099     IMSI
+        [11] Unknown             number
     """
     devices: dict[str, dict[str, Any]] = {}
 
-    lines = response.splitlines()
+    # Снимаем префикс 'Output: ' и убираем пустые/служебные строки
+    normalized_lines = []
+    for raw_line in response.splitlines():
+        if raw_line.startswith("Response:") or raw_line.startswith("Message:"):
+            continue
+        line = _strip_ami_output_prefix(raw_line)
+        normalized_lines.append(line)
+
+    # Ищем строку заголовка
     header_idx = None
-    for i, line in enumerate(lines):
-        # Заголовок: содержит 'State', 'IMEI' и 'Number'
+    for i, line in enumerate(normalized_lines):
         if "State" in line and "IMEI" in line and "Number" in line:
             header_idx = i
             break
 
     if header_idx is None:
         _LOGGER.warning(
-            "Не найден заголовок в выводе 'dongle show devices'. "
-            "Проверьте формат ответа AMI. Ответ:\n%s",
+            "Не найден заголовок в выводе 'dongle show devices'. Ответ:\n%s",
             response,
         )
         return devices
 
-    for line in lines[header_idx + 1:]:
+    for line in normalized_lines[header_idx + 1:]:
         line = line.strip()
-        if not line:
-            continue
-        # Разделители и служебные строки AMI
-        if line.startswith("--"):
-            continue
-        if line.startswith("Response:") or line.startswith("Privilege:"):
+        if not line or line.startswith("--"):
             continue
         if line.startswith("--END COMMAND--"):
             continue
@@ -217,6 +233,14 @@ def _parse_devices_response(response: str) -> dict[str, dict[str, Any]]:
         imei      = parts[9]  if len(parts) > 9  else dongle_id
         imsi      = parts[10] if len(parts) > 10 else ""
         number    = parts[11] if len(parts) > 11 else ""
+
+        # Защита: IMEI должен содержать только цифры и иметь длину 14-16
+        if not (imei.isdigit() and 14 <= len(imei) <= 16):
+            _LOGGER.warning(
+                "Похоже, строка разобрана неверно (IMEI='%s'). Пропускаю: %s",
+                imei, line,
+            )
+            continue
 
         devices[imei] = {
             "dongle_id": dongle_id,

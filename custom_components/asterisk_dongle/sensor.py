@@ -152,7 +152,7 @@ class AsteriskDongleSignalSensor(SensorEntity):
             _LOGGER.debug("Sensor %s: не удалось распарсить ответ", self._attr_unique_id)
             return
 
-        # Доп. инфо об устройстве (реальные ключи из вывода AMI)
+        # Обновляем доп. инфо об устройстве
         for dst, src in (
             ("provider", "provider_name"),
             ("model", "model"),
@@ -165,7 +165,6 @@ class AsteriskDongleSignalSensor(SensorEntity):
             if value:
                 self._device_info[dst] = value
 
-        # RSSI в ответе: "21, -71 dBm" — ключ 'rssi'
         rssi = self._extract_signal_value(state.get("rssi", ""))
         _LOGGER.debug(
             "Sensor %s: rssi='%s', parsed=%s",
@@ -188,9 +187,20 @@ class AsteriskDongleSignalSensor(SensorEntity):
         }
 
     def _parse_dongle_state(self, response: str) -> dict[str, Any]:
-        """Парсит вывод 'dongle show device state <id>'."""
+        """
+        Парсит вывод 'dongle show device state <id>'.
+
+        Каждая строка данных идёт с префиксом 'Output: ' и содержит
+        ещё один ':' внутри:
+            Output:   Device                  : dongle0
+            Output:   State                   : Free
+            Output:   RSSI                    : 21, -71 dBm
+        """
         state: dict[str, Any] = {}
-        for line in response.splitlines():
+        for raw_line in response.splitlines():
+            # Снимаем префикс 'Output: '
+            line = re.sub(r"^Output:\s?", "", raw_line)
+            line = line.rstrip()
             if ":" not in line:
                 continue
             key, _, value = line.partition(":")
