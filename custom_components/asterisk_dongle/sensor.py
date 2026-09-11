@@ -34,7 +34,6 @@ async def async_setup_entry(
     devices = data[DATA_DEVICES]
     main_device_id = data.get("main_device_id")
 
-    # Создаем начальные сенсоры
     entities = []
     for imei, device_info in devices.items():
         sensor = AsteriskDongleSignalSensor(
@@ -51,7 +50,6 @@ async def async_setup_entry(
 
     @callback
     def async_add_sensor(device_info):
-        """Добавить сенсор для нового устройства."""
         new_sensor = AsteriskDongleSignalSensor(
             hass=hass,
             manager=manager,
@@ -63,7 +61,6 @@ async def async_setup_entry(
 
     @callback
     def async_remove_sensor(device_info):
-        """Удалить сенсор для удалённого устройства."""
         imei = device_info["imei"]
         entity_id = f"sensor.dongle_{imei}_cell_signal"
         entity = hass.states.get(entity_id)
@@ -103,7 +100,6 @@ class AsteriskDongleSignalSensor(SensorEntity):
         entry_id: str,
         main_device_id: str | None = None,
     ):
-        """Инициализация сенсора."""
         self.hass = hass
         self._manager = manager
         self._device_info = device_info
@@ -120,7 +116,6 @@ class AsteriskDongleSignalSensor(SensorEntity):
 
     @property
     def device_info(self) -> dict[str, Any]:
-        """Информация об устройстве."""
         return {
             "identifiers": {(DOMAIN, self._device_info["imei"])},
             "name": f"Dongle {self._device_info.get('number') or self._device_info['imei']}",
@@ -134,17 +129,31 @@ class AsteriskDongleSignalSensor(SensorEntity):
         """Обновление состояния сенсора."""
         dongle_id = self._device_info.get("dongle_id")
         if not dongle_id:
+            _LOGGER.debug("Sensor %s: нет dongle_id", self._attr_unique_id)
             return
 
         response = await self.hass.async_add_executor_job(
             self._manager.send_command, f"dongle show device state {dongle_id}"
         )
+
         if not response:
-            _LOGGER.debug("Нет ответа для донгла %s", dongle_id)
+            _LOGGER.debug(
+                "Sensor %s: пустой ответ AMI для %s",
+                self._attr_unique_id, dongle_id,
+            )
             return
+
+        _LOGGER.debug(
+            "Sensor %s: ответ AMI:\n%s",
+            self._attr_unique_id, response,
+        )
 
         state = self._parse_dongle_state(response)
         if not state:
+            _LOGGER.debug(
+                "Sensor %s: не удалось распарсить ответ",
+                self._attr_unique_id,
+            )
             return
 
         # Обновляем доп. инфо об устройстве
@@ -152,12 +161,18 @@ class AsteriskDongleSignalSensor(SensorEntity):
             if state.get(key):
                 self._device_info[key] = state[key]
 
-        rssi = self._extract_signal_value(state.get("rssi_raw", ""))
+        # ВАЖНО: ключ в ответе 'dongle show device state' называется 'rssi'
+        rssi = self._extract_signal_value(state.get("rssi", ""))
+        _LOGGER.debug(
+            "Sensor %s: rssi_raw='%s', parsed=%s",
+            self._attr_unique_id, state.get("rssi"), rssi,
+        )
+
         if rssi is not None:
             self._attr_native_value = rssi
 
         self._attr_extra_state_attributes = {
-            "raw_rssi": state.get("rssi_raw"),
+            "raw_rssi": state.get("rssi"),
             "provider": state.get("provider"),
             "registration": state.get("registration"),
             "network_mode": state.get("mode"),
@@ -200,7 +215,6 @@ class AsteriskDongleSignalSensor(SensorEntity):
         return None
 
     def _calculate_signal_quality(self, rssi: int | None) -> str:
-        """Определяет качество сигнала по RSSI."""
         if rssi is None:
             return "Unknown"
         if rssi >= -70:
