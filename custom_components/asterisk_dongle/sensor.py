@@ -1,24 +1,21 @@
-"""Platform for sensor integration."""
+"""Support for Asterisk Dongle sensors."""
+
 from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     DOMAIN,
     DATA_ASTERISK_MANAGER,
     DATA_DEVICES,
-    ATTR_IMEI,
-    ATTR_DONGLE_ID,
     SIGNAL_DEVICE_DISCOVERED,
     SIGNAL_DEVICE_REMOVED,
 )
@@ -31,11 +28,12 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Настройка сенсоров из ConfigEntry."""
+    """Настройка сенсоров для всех донглов."""
     data = hass.data[DOMAIN][entry.entry_id]
     manager = data[DATA_ASTERISK_MANAGER]
     devices = data[DATA_DEVICES]
-    
+    main_device_id = data.get("main_device_id")
+
     # Создаем начальные сенсоры
     entities = []
     for imei, device_info in devices.items():
@@ -43,271 +41,172 @@ async def async_setup_entry(
             hass=hass,
             manager=manager,
             device_info=device_info,
-            entry_id=entry.entry_id
+            entry_id=entry.entry_id,
+            main_device_id=main_device_id,
         )
         entities.append(sensor)
-    
-    async_add_entities(entities, update_before_add=True)
-    
-    # Регистрируем обработчики для новых устройств
+
+    if entities:
+        async_add_entities(entities)
+
     @callback
-    async def async_add_sensor(device_info):
+    def async_add_sensor(device_info):
         """Добавить сенсор для нового устройства."""
         new_sensor = AsteriskDongleSignalSensor(
             hass=hass,
             manager=manager,
             device_info=device_info,
-            entry_id=entry.entry_id
+            entry_id=entry.entry_id,
+            main_device_id=main_device_id,
         )
-        async_add_entities([new_sensor], update_before_add=True)
-        _LOGGER.info("Added new sensor for device with IMEI: %s", device_info[ATTR_IMEI])
-    
+        async_add_entities([new_sensor])
+
     @callback
-    def async_remove_sensor(imei):
-        """Удалить сенсор для устройства."""
-        # Находим и удаляем сущность
-        for entity in entities:
-            if hasattr(entity, '_attr_unique_id') and imei in entity.unique_id:
-                hass.async_create_task(entity.async_remove())
-                _LOGGER.info("Removed sensor for device with IMEI: %s", imei)
-                break
-    
-    # Подписываемся на сигналы
-    async_dispatcher_connect(
-        hass,
-        f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
-        async_add_sensor
+    def async_remove_sensor(device_info):
+        """Удалить сенсор для удалённого устройства."""
+        imei = device_info["imei"]
+        entity_id = f"sensor.dongle_{imei}_cell_signal"
+        entity = hass.states.get(entity_id)
+        if entity:
+            hass.async_create_task(
+                hass.services.async_call(
+                    "homeassistant", "remove_entity", {"entity_id": entity_id}
+                )
+            )
+
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{SIGNAL_DEVICE_DISCOVERED}_{entry.entry_id}",
+            async_add_sensor,
+        )
     )
-    
-    async_dispatcher_connect(
-        hass,
-        f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
-        async_remove_sensor
+    entry.async_on_unload(
+        async_dispatcher_connect(
+            hass,
+            f"{SIGNAL_DEVICE_REMOVED}_{entry.entry_id}",
+            async_remove_sensor,
+        )
     )
 
 
 class AsteriskDongleSignalSensor(SensorEntity):
-    """Сенсор уровня сигнала dongle."""
-    
-    _attr_has_entity_name = False  # Используем собственное имя без автоматического префикса
-    _attr_icon = "mdi:signal"
-    
+    """Сенсор уровня сигнала GSM-донгла."""
+
+    _attr_should_poll = True
+
     def __init__(
         self,
         hass: HomeAssistant,
         manager,
         device_info: dict[str, Any],
-        entry_id: str
+        entry_id: str,
+        main_device_id: str | None = None,
     ):
         """Инициализация сенсора."""
         self.hass = hass
         self._manager = manager
         self._device_info = device_info
         self._entry_id = entry_id
-        
-        # Уникальный ID для entity_id: sensor.dongle_<IMEI>_cell_signal
-        imei = device_info[ATTR_IMEI]
-        self._attr_unique_id = f"dongle_{imei}_cell_signal"
-        
-        # Имя сенсора (отображаемое в интерфейсе)
+        self._main_device_id = main_device_id
+
+        imei = device_info["imei"]
+        self._attr_unique_id = f"asterisk_dongle_{imei}_signal"
         self._attr_name = f"Cell Signal {imei}"
-        
-        # Атрибуты сенсора
-        self._attr_device_class = "signal_strength"
         self._attr_native_unit_of_measurement = "dBm"
-        self._attr_should_poll = True
-        
-        # Состояние
+        self._attr_icon = "mdi:signal"
         self._attr_native_value = None
-        self._attributes = {}
-        self._available = True
-        self._manufacturer = "Unknown"  # Будет обновлено при первом обновлении
-        
-        # История обновлений
-        self._last_update = None
+        self._attr_extra_state_attributes = {}
 
     @property
-    def device_info(self):
-        """Возвращает информацию об устройстве."""
-        imei = self._device_info[ATTR_IMEI]
-        
+    def device_info(self) -> dict[str, Any]:
+        """Информация об устройстве."""
         return {
-            "identifiers": {(DOMAIN, imei)},
-            "name": f"Dongle {imei}",
-            "manufacturer": self._manufacturer,
-            "model": self._device_info.get("model", "Unknown"),
-            "sw_version": self._device_info.get("firmware", "Unknown"),
-            "via_device": (DOMAIN, self._entry_id),
+            "identifiers": {(DOMAIN, self._device_info["imei"])},
+            "name": f"Dongle {self._device_info.get('number') or self._device_info['imei']}",
+            "manufacturer": self._device_info.get("model") or "GSM Dongle",
+            "model": self._device_info.get("model"),
+            "sw_version": self._device_info.get("firmware"),
+            "via_device_id": self._main_device_id,
         }
 
-    @property
-    def extra_state_attributes(self):
-        """Возвращает дополнительные атрибуты."""
-        attrs = self._attributes.copy()
-        attrs.update({
-            "imei": self._device_info[ATTR_IMEI],
-            "dongle_id": self._device_info[ATTR_DONGLE_ID],
-            "last_update": self._last_update,
-            "provider": self._device_info.get("provider", ""),
-            "state": self._device_info.get("state", ""),
-            "device_model": self._device_info.get("model", ""),
-            "manufacturer": self._manufacturer,
-        })
-        return attrs
+    async def async_update(self) -> None:
+        """Обновление состояния сенсора."""
+        dongle_id = self._device_info.get("dongle_id")
+        if not dongle_id:
+            return
 
-    @property
-    def available(self):
-        """Возвращает доступность сенсора."""
-        return self._available
+        response = await self.hass.async_add_executor_job(
+            self._manager.send_command, f"dongle show device state {dongle_id}"
+        )
+        if not response:
+            _LOGGER.debug("Нет ответа для донгла %s", dongle_id)
+            return
 
-    async def async_update(self):
-        """Обновление данных сенсора."""
-        try:
-            # Получаем детальную информацию о донгле
-            dongle_id = self._device_info[ATTR_DONGLE_ID]
-            command = f"dongle show device state {dongle_id}"
-            response = await self.hass.async_add_executor_job(
-                self._manager.send_command, command
-            )
-            
-            if not response:
-                self._available = False
-                _LOGGER.warning("No response for device %s", dongle_id)
-                return
-            
-            # Парсим ответ (учитывая формат AMI с префиксом Output:)
-            data = self._parse_dongle_state(response)
-            
-            if not data:
-                self._available = False
-                _LOGGER.warning("Could not parse response for device %s", dongle_id)
-                return
-            
-            # Извлекаем уровень сигнала
-            rssi_str = data.get("rssi", "")
-            signal_value = self._extract_signal_value(rssi_str)
-            self._attr_native_value = signal_value
-            
-            # Обновляем производителя из данных
-            if "manufacturer" in data:
-                self._manufacturer = data["manufacturer"].strip().title()
-                
-                # Обновляем информацию об устройстве в реестре
-                await self._update_device_info(data)
-            
-            # Сохраняем атрибуты
-            self._attributes = {
-                "raw_rssi": rssi_str,
-                "provider": data.get("provider_name", self._device_info.get("provider", "")),
-                "registration": data.get("gsm_registration_status", ""),
-                "network_mode": data.get("mode", self._device_info.get("mode", "")),
-                "submode": data.get("submode", self._device_info.get("submode", "")),
-                "lac": data.get("location_area_code", ""),
-                "cell_id": data.get("cell_id", ""),
-                "signal_quality": self._calculate_signal_quality(signal_value),
-                "manufacturer": self._manufacturer,
-            }
-            
-            self._last_update = datetime.now().isoformat()
-            self._available = True
-            
-            _LOGGER.debug("Successfully updated sensor for device %s. Signal: %s dBm, Manufacturer: %s", 
-                         dongle_id, signal_value, self._manufacturer)
-            
-        except Exception as e:
-            _LOGGER.error("Error updating sensor for %s: %s", 
-                         self._device_info[ATTR_DONGLE_ID], str(e))
-            self._available = False
+        state = self._parse_dongle_state(response)
+        if not state:
+            return
 
-    async def _update_device_info(self, data: dict):
-        """Обновляет информацию об устройстве в реестре устройств."""
-        try:
-            device_registry = dr.async_get(self.hass)
-            imei = self._device_info[ATTR_IMEI]
-            
-            # Находим устройство по IMEI
-            device = device_registry.async_get_device(
-                identifiers={(DOMAIN, imei)}
-            )
-            
-            if device:
-                # Обновляем производителя и другие поля
-                device_registry.async_update_device(
-                    device.id,
-                    manufacturer=self._manufacturer,
-                    model=data.get("model", self._device_info.get("model", "Unknown")),
-                    sw_version=data.get("firmware", self._device_info.get("firmware", "Unknown")),
-                )
-                _LOGGER.debug("Updated device info for %s: %s", imei, self._manufacturer)
-        except Exception as e:
-            _LOGGER.warning("Could not update device info: %s", e)
+        # Обновляем доп. инфо об устройстве
+        for key in ("provider", "model", "firmware", "number", "imsi"):
+            if state.get(key):
+                self._device_info[key] = state[key]
 
-    def _extract_signal_value(self, rssi_str: str):
-        """Извлекает значение сигнала из строки."""
-        if not rssi_str:
+        rssi = self._extract_signal_value(state.get("rssi_raw", ""))
+        if rssi is not None:
+            self._attr_native_value = rssi
+
+        self._attr_extra_state_attributes = {
+            "raw_rssi": state.get("rssi_raw"),
+            "provider": state.get("provider"),
+            "registration": state.get("registration"),
+            "network_mode": state.get("mode"),
+            "submode": state.get("submode"),
+            "lac": state.get("lac"),
+            "cell_id": state.get("cell_id"),
+            "signal_quality": self._calculate_signal_quality(rssi),
+            "manufacturer": state.get("model"),
+        }
+
+    def _parse_dongle_state(self, response: str) -> dict[str, Any]:
+        """Парсит вывод 'dongle show device state <id>'."""
+        state: dict[str, Any] = {}
+        for line in response.splitlines():
+            if ":" not in line:
+                continue
+            key, _, value = line.partition(":")
+            key = key.strip().lower().replace(" ", "_")
+            value = value.strip()
+            if key:
+                state[key] = value
+        return state
+
+    def _extract_signal_value(self, raw: str) -> int | None:
+        """Извлекает значение RSSI в dBm."""
+        if not raw:
             return None
-        
-        # Пробуем извлечь значение в dBm (формат: "26, -61 dBm")
-        match = re.search(r"(-?\d+)\s*dBm", rssi_str)
+
+        # Формат "-61 dBm"
+        match = re.search(r"(-?\d+)\s*dBm", raw)
         if match:
             return int(match.group(1))
-        
-        # Пробуем извлечь сырое значение (например: "31, -51 dBm")
-        match_raw = re.search(r"(\d+)\s*,\s*", rssi_str)
-        if match_raw:
-            raw_value = int(match_raw.group(1))
-            # Конвертируем сырое значение в dBm
+
+        # Сырое значение -> dBm: (raw * 2) - 113
+        match = re.search(r"(\d+)", raw)
+        if match:
+            raw_value = int(match.group(1))
             return (raw_value * 2) - 113
-        
+
         return None
 
-    def _parse_dongle_state(self, response):
-        """Парсинг ответа от dongle show device state через AMI."""
-        data = {}
-        lines = response.split('\n')
-        in_output_block = False
-        
-        for line in lines:
-            line = line.strip()
-            
-            if "Command output follows" in line:
-                in_output_block = True
-                continue
-                
-            if line == "--END COMMAND--" or (line == "" and in_output_block):
-                in_output_block = False
-                continue
-                
-            if in_output_block and line.startswith("Output: "):
-                # Удаляем префикс "Output: " перед парсингом
-                line = line[8:].strip()
-                
-                # Пропускаем разделители и пустые строки
-                if not line or line.startswith("---"):
-                    continue
-                
-                # Парсим строки вида "Manufacturer            : huawei"
-                if ":" in line:
-                    key, value = line.split(":", 1)
-                    key = key.strip().lower().replace(" ", "_")
-                    data[key] = value.strip()
-        
-        return data
-
-    def _calculate_signal_quality(self, signal_db):
-        """Рассчитывает качество сигнала."""
-        if signal_db is None:
+    def _calculate_signal_quality(self, rssi: int | None) -> str:
+        """Определяет качество сигнала по RSSI."""
+        if rssi is None:
             return "Unknown"
-        
-        try:
-            signal = int(signal_db)
-            if signal >= -70:
-                return "Excellent"
-            elif signal >= -85:
-                return "Good"
-            elif signal >= -100:
-                return "Fair"
-            else:
-                return "Poor"
-        except (ValueError, TypeError):
-            return "Unknown"
+        if rssi >= -70:
+            return "Excellent"
+        if rssi >= -85:
+            return "Good"
+        if rssi >= -100:
+            return "Fair"
+        return "Poor"
