@@ -18,7 +18,6 @@ from .const import (
     DOMAIN,
     DATA_ASTERISK_MANAGER,
     DATA_DEVICES,
-    DATA_SCAN_INTERVAL,
     DISCOVERY_INTERVAL,
     SIGNAL_DEVICE_DISCOVERED,
     SIGNAL_DEVICE_REMOVED,
@@ -49,7 +48,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_ASTERISK_MANAGER: manager,
         DATA_DEVICES: {},
-        DATA_SCAN_INTERVAL: entry.data.get("scan_interval", 60),
     }
 
     # Создаем главное устройство для интеграции и сохраняем его id
@@ -185,7 +183,6 @@ def _parse_devices_response(response: str) -> dict[str, dict[str, Any]]:
             continue
 
         dongle_id = parts[0]
-        # Формат: ID Group State RSSI Mode Submode Provider Model Firmware IMEI IMSI Number
         try:
             group = parts[1] if len(parts) > 1 else ""
             state = parts[2] if len(parts) > 2 else ""
