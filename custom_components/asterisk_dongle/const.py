@@ -19,6 +19,7 @@ DISCOVERY_INTERVAL: Final = 300  # 5 минут вместо 1 часа для �
 DATA_ASTERISK_MANAGER: Final = "asterisk_manager"
 DATA_DEVICES: Final = "devices"
 DATA_CONFIG_ENTRY: Final = "config_entry"
+DATA_SCAN_INTERVAL: Final = "scan_interval"   # <-- добавлено
 
 # Уникальные идентификаторы
 ATTR_IMEI: Final = "imei"
@@ -32,10 +33,6 @@ SIGNAL_DEVICE_REMOVED: Final = "asterisk_dongle_device_removed"
 # Типы платформ
 PLATFORM_NOTIFY: Final = "notify"
 PLATFORM_SENSOR: Final = "sensor"
-
-# Типы сервисов notify
-SERVICE_SMS: Final = "sms"
-SERVICE_USSD: Final = "ussd"
 
 # Типы сервисов notify
 SERVICE_SMS: Final = "sms"
